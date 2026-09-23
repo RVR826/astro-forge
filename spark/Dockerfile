@@ -13,3 +13,5 @@ ENV SPARK_HOME=/opt/spark
 ENV PATH="${SPARK_HOME}/bin:${SPARK_HOME}/sbin:${PATH}"
 
 WORKDIR /workspace
+
+COPY spark_config.py /workspace/jobs/spark_config.py
