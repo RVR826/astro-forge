@@ -1,0 +1,92 @@
+services:
+
+  rustfs:
+    image: rustfs/rustfs:latest
+    container_name: data-lake-rustfs
+    restart: unless-stopped
+    command: --console-address ":9001"
+    environment:
+      RUSTFS_ACCESS_KEY: ${RUSTFS_ACCESS_KEY}
+      RUSTFS_SECRET_KEY: ${RUSTFS_SECRET_KEY}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - ${RUSTFS_VOLUME}:/data
+
+  postgres:
+    image: postgres:18.4
+    container_name: data-lake-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POLARIS_DB_USER}
+      POSTGRES_PASSWORD: ${POLARIS_DB_PASSWORD}
+      POSTGRES_DB: ${POLARIS_DB_NAME}
+    volumes:
+      - ${POSTGRES_VOLUME}:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POLARIS_DB_USER} -d ${POLARIS_DB_NAME}"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+
+  polaris:
+    image: apache/polaris:1.7.0
+    container_name: data-lake-polaris
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      AWS_ACCESS_KEY_ID: ${RUSTFS_ACCESS_KEY}
+      AWS_SECRET_ACCESS_KEY: ${RUSTFS_SECRET_KEY}
+      AWS_REGION: ${AWS_REGION}
+      POLARIS_PERSISTENCE_TYPE: relational-jdbc
+      QUARKUS_DATASOURCE_DB_KIND: postgresql
+      QUARKUS_DATASOURCE_USERNAME: ${POLARIS_DB_USER}
+      QUARKUS_DATASOURCE_PASSWORD: ${POLARIS_DB_PASSWORD}
+      QUARKUS_DATASOURCE_JDBC_URL: jdbc:postgresql://postgres:5432/${POLARIS_DB_NAME}
+      POLARIS_REALM_CONTEXT_REALMS: ${POLARIS_REALM}
+
+      # Keep Polaris telemetry disabled for this local prototype.
+      QUARKUS_OTEL_SDK_DISABLED: "true"
+
+    ports:
+      - "8181:8181"
+
+  spark:
+    build:
+      context: ./spark
+    container_name: data-lake-spark
+    restart: unless-stopped
+    command: ["tail", "-f", "/dev/null"]
+    network_mode: "service:rustfs"
+    depends_on:
+      - rustfs
+      - polaris
+    environment:
+      AWS_ACCESS_KEY_ID: ${RUSTFS_ACCESS_KEY}
+      AWS_SECRET_ACCESS_KEY: ${RUSTFS_SECRET_KEY}
+      AWS_REGION: ${AWS_REGION}
+      POLARIS_CLIENT_ID: ${POLARIS_CLIENT_ID}
+      POLARIS_CLIENT_SECRET: ${POLARIS_CLIENT_SECRET}
+    volumes:
+      - ${SPARK_VOLUME}:/workspace
+
+  trino:
+    image: trinodb/trino:483
+    container_name: data-lake-trino
+    restart: unless-stopped
+    depends_on:
+      - rustfs
+      - polaris
+    ports:
+      - "8080:8080"
+    environment:
+      AWS_ACCESS_KEY_ID: ${RUSTFS_ACCESS_KEY}
+      AWS_SECRET_ACCESS_KEY: ${RUSTFS_SECRET_KEY}
+      AWS_DEFAULT_REGION: ${AWS_REGION}
+      POLARIS_CLIENT_ID: ${POLARIS_CLIENT_ID}
+      POLARIS_CLIENT_SECRET: ${POLARIS_CLIENT_SECRET}
+    volumes:
+      - ${TRINO_VOLUME}:/etc/trino/catalog
