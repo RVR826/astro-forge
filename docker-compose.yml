@@ -70,8 +70,6 @@ services:
       AWS_REGION: ${AWS_REGION}
       POLARIS_CLIENT_ID: ${POLARIS_CLIENT_ID}
       POLARIS_CLIENT_SECRET: ${POLARIS_CLIENT_SECRET}
-    volumes:
-      - ${SPARK_VOLUME}:/workspace
 
   trino:
     image: trinodb/trino:483
