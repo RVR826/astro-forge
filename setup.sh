@@ -24,6 +24,7 @@ RUSTFS_ACCESS_KEY=rustfsadmin
 RUSTFS_SECRET_KEY=rustfsadmin123
 AWS_REGION=us-east-1
 DEFAULT_S3_BUCKET_NAME=astro-forge
+INCOMING_S3_BUCKET_NAME=incoming
 
 POLARIS_DB_USER=polaris
 POLARIS_DB_PASSWORD=polarisadmin123
@@ -140,7 +141,7 @@ log "Waiting for RustFS"
 # Create S3 bucket
 ###############################################################################
 
-log "Ensuring S3 bucket exists"
+log "Ensuring default S3 bucket exists"
 
 if docker run --rm \
     --network "${NETWORK_NAME}" \
@@ -166,6 +167,36 @@ else
         --endpoint-url "http://rustfs:9000" \
         s3api create-bucket \
         --bucket "${DEFAULT_S3_BUCKET_NAME}"
+
+    echo "Bucket created."
+fi
+
+log "Ensuring incoming S3 bucket exists"
+
+if docker run --rm \
+    --network "${NETWORK_NAME}" \
+    -e AWS_ACCESS_KEY_ID="${RUSTFS_ACCESS_KEY}" \
+    -e AWS_SECRET_ACCESS_KEY="${RUSTFS_SECRET_KEY}" \
+    -e AWS_DEFAULT_REGION="${AWS_REGION}" \
+    amazon/aws-cli:latest \
+    --endpoint-url "http://rustfs:9000" \
+    s3api head-bucket \
+    --bucket "${INCOMING_S3_BUCKET_NAME}" >/dev/null 2>&1; then
+
+    echo "Bucket '${INCOMING_S3_BUCKET_NAME}' already exists."
+
+else
+    echo "Creating bucket '${INCOMING_S3_BUCKET_NAME}'..."
+
+    docker run --rm \
+        --network "${NETWORK_NAME}" \
+        -e AWS_ACCESS_KEY_ID="${RUSTFS_ACCESS_KEY}" \
+        -e AWS_SECRET_ACCESS_KEY="${RUSTFS_SECRET_KEY}" \
+        -e AWS_DEFAULT_REGION="${AWS_REGION}" \
+        amazon/aws-cli:latest \
+        --endpoint-url "http://rustfs:9000" \
+        s3api create-bucket \
+        --bucket "${INCOMING_S3_BUCKET_NAME}"
 
     echo "Bucket created."
 fi
@@ -471,6 +502,15 @@ docker compose -f "${COMPOSE_FILE}" build spark
 docker compose -f "${COMPOSE_FILE}" up -d spark
 
 ###############################################################################
+# Build and start Agent
+###############################################################################
+
+log "Starting Agent"
+
+docker compose -f "${COMPOSE_FILE}" build agent
+docker compose -f "${COMPOSE_FILE}" up -d agent
+
+###############################################################################
 # Final status
 ###############################################################################
 
@@ -483,13 +523,17 @@ echo "  RustFS:    http://localhost:9000"
 echo "  Polaris:   http://localhost:8181"
 echo "  Trino:     http://localhost:8080"
 echo
-echo "S3 bucket:"
-echo "  s3://${DEFAULT_S3_BUCKET_NAME}"
+echo "S3 buckets:"
+echo "  (Default)s3://${DEFAULT_S3_BUCKET_NAME}"
+echo "  (Incoming) s3://${INCOMING_S3_BUCKET_NAME}"
 echo
 echo "Polaris catalog:"
 echo "  astronomy"
 echo
 echo "Spark:"
 echo "  /workspace/jobs/spark_config.py"
+
+echo "Agent:"
+echo "  /app/main.py"
 echo
 echo "Deployment completed successfully."

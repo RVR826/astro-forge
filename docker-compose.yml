@@ -88,3 +88,24 @@ services:
       POLARIS_CLIENT_SECRET: ${POLARIS_CLIENT_SECRET}
     volumes:
       - ${TRINO_VOLUME}:/etc/trino/catalog
+
+  agent:
+    build:
+      context: ./agent
+    container_name: data-lake-agent
+    restart: unless-stopped
+    command: ["tail", "-f", "/dev/null"]
+    depends_on:
+      - spark
+    environment:
+      # OPENAI_API_KEY: ${OPENAI_API_KEY}
+      AWS_ACCESS_KEY_ID: ${RUSTFS_ACCESS_KEY}
+      AWS_SECRET_ACCESS_KEY: ${RUSTFS_SECRET_KEY}
+      AWS_REGION: ${AWS_REGION}
+
+      RUSTFS_ENDPOINT: http://rustfs:9000
+      RUSTFS_INCOMING_BUCKET: incoming
+      RUSTFS_DATA_BUCKET: astro-forge
+      RUSTFS_INCOMING_PREFIX: ""
+      RUSTFS_RAW_PREFIX: raw/
+      RUSTFS_STATE_KEY: metadata/system/ingestion-state.json
