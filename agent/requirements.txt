@@ -1,3 +1,4 @@
+openai
 openai-agents
 boto3
 botocore
