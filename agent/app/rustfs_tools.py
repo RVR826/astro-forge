@@ -251,9 +251,189 @@ def check_for_new_files() -> str:
         indent=2,
     )
 
+@function_tool
+def read_file(
+    source_key: str,
+    start_byte: int = 0,
+    max_bytes: int = 16384,
+    bucket: str = "",
+) -> str:
+    """Read a bounded byte range from a RustFS object.
+
+    Use start_byte=0 to read from the beginning. For subsequent
+    reads, use the next_start_byte returned by the previous call.
+    The content is returned as text without schema inference.
+    """
+    if not source_key or source_key.startswith("/"):
+        return json.dumps({
+            "error": "source_key must be a relative object key"
+        })
+
+    if start_byte < 0:
+        return json.dumps({
+            "error": "start_byte must be non-negative"
+        })
+
+    # Restrict reads to the configured data buckets.
+    selected_bucket = bucket or INCOMING_BUCKET
+    allowed_buckets = {INCOMING_BUCKET, DATA_BUCKET}
+
+    if selected_bucket not in allowed_buckets:
+        return json.dumps({
+            "error": "Bucket is not permitted",
+            "allowed_buckets": sorted(allowed_buckets),
+        })
+
+    # Keep each read bounded, even if the agent requests a huge range.
+    max_bytes = max(1, min(int(max_bytes), 65536))
+
+    try:
+        metadata = s3.head_object(
+            Bucket=selected_bucket,
+            Key=source_key,
+        )
+        file_size = metadata["ContentLength"]
+
+        if start_byte >= file_size:
+            return json.dumps({
+                "bucket": selected_bucket,
+                "source_key": source_key,
+                "file_size_bytes": file_size,
+                "start_byte": start_byte,
+                "content": "",
+                "bytes_read": 0,
+                "next_start_byte": file_size,
+                "eof": True,
+            })
+
+        end_byte = min(start_byte + max_bytes - 1, file_size - 1)
+
+        response = s3.get_object(
+            Bucket=selected_bucket,
+            Key=source_key,
+            Range=f"bytes={start_byte}-{end_byte}",
+        )
+
+        try:
+            raw = response["Body"].read(max_bytes)
+        finally:
+            response["Body"].close()
+
+        bytes_read = len(raw)
+        next_start_byte = start_byte + bytes_read
+
+        return json.dumps({
+            "bucket": selected_bucket,
+            "source_key": source_key,
+            "file_size_bytes": file_size,
+            "start_byte": start_byte,
+            "content": raw.decode("utf-8", errors="replace"),
+            "bytes_read": bytes_read,
+            "next_start_byte": next_start_byte,
+            "eof": next_start_byte >= file_size,
+            "note": (
+                "Content is a raw byte-range sample decoded as UTF-8. "
+                "A range may begin or end partway through a line or "
+                "multibyte character. Use the returned byte offset "
+                "to continue reading."
+            ),
+        }, ensure_ascii=False)
+
+    except ClientError as exc:
+        return json.dumps({
+            "error": "Unable to read RustFS object",
+            "bucket": selected_bucket,
+            "source_key": source_key,
+            "details": str(exc),
+        })
 
 @function_tool
-def finalize_ingestion(
+def save_ingestion_proposal(
+    source_key: str,
+    profile_json: str,
+    prompt: str,
+    proposal_md: str,
+    semantic_metadata_md: str,
+    ingestion_script: str,
+) -> str:
+    """Save reviewable proposal artifacts without executing ingestion."""
+    try:
+        profile = json.loads(profile_json)
+    except json.JSONDecodeError as exc:
+        return json.dumps({
+            "error": "profile_json is not valid JSON",
+            "details": str(exc),
+        })
+
+    if not isinstance(profile, dict):
+        return json.dumps({"error": "Profile must be a JSON object"})
+
+    if profile.get("source_key") != source_key:
+        return json.dumps({
+            "error": "Profile source_key does not match source_key"
+        })
+
+    try:
+        s3.head_object(
+            Bucket=INCOMING_BUCKET,
+            Key=source_key,
+        )
+    except ClientError as exc:
+        return json.dumps({
+            "error": "Source file was not found in the incoming bucket",
+            "source_key": source_key,
+            "details": str(exc),
+        })
+
+    proposal_id = str(uuid.uuid4())
+    filename = _source_filename(source_key)
+    prefix = f"metadata/proposals/{proposal_id}-{filename}/"
+
+    artifacts = {
+        "profile.json": (
+            json.dumps(profile, indent=2, ensure_ascii=False),
+            "application/json",
+        ),
+        "prompt.md": (prompt, "text/markdown"),
+        "proposal.md": (proposal_md, "text/markdown"),
+        "semantic-metadata.md": (
+            semantic_metadata_md,
+            "text/markdown",
+        ),
+        "ingest.py": (ingestion_script, "text/x-python"),
+    }
+
+    saved_keys = {}
+
+    try:
+        for filename, (content, content_type) in artifacts.items():
+            key = prefix + filename
+            _upload_text(key, content, content_type)
+            s3.head_object(Bucket=DATA_BUCKET, Key=key)
+            saved_keys[filename] = key
+    except Exception as exc:
+        return json.dumps({
+            "error": "Failed to save or verify proposal artifacts",
+            "proposal_id": proposal_id,
+            "bucket": DATA_BUCKET,
+            "saved_artifacts": saved_keys,
+            "details": str(exc),
+        })
+
+    return json.dumps({
+        "status": "proposal_saved_for_review",
+        "proposal_id": proposal_id,
+        "source_bucket": INCOMING_BUCKET,
+        "source_key": source_key,
+        "artifact_bucket": DATA_BUCKET,
+        "artifacts": saved_keys,
+        "executed": False,
+        "ingestion_state_updated": False,
+        "iceberg_table_created": False,
+    }, indent=2)
+
+@function_tool
+def save_ingestion_artifacts(
     source_key: str,
     prompt: str,
     ingestion_script: str,

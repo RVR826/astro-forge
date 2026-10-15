@@ -1,6 +1,7 @@
 import asyncio
 import os
 
+from pathlib import Path
 from openai import AsyncOpenAI
 from agents import (
     Agent,
@@ -12,11 +13,25 @@ from agents import (
 from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
 from app.rustfs_tools import (
     check_for_new_files,
-    finalize_ingestion,
+    read_file,
+    save_ingestion_proposal,
+    save_ingestion_artifacts,
 )
 
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL")
+
+def load_agent_instructions() -> str:
+    instructions_path = (
+        Path(__file__).resolve().parent.parent / "prompts" / "agent_instructions.md"
+    )
+    return instructions_path.read_text(encoding="utf-8")
+
+def load_prompt(prompt_name: str) -> str:
+    prompt_path = (
+        Path(__file__).resolve().parent.parent / "prompts" / f"{prompt_name}.md"
+    )
+    return prompt_path.read_text(encoding="utf-8")
 
 def setup_client() -> AsyncOpenAI:
     if not OPENROUTER_API_KEY:
@@ -50,36 +65,11 @@ def setup_agent() -> Agent:
     return Agent(
         name="Astronomy Data Ingestion Agent",
         model=model,
-        instructions="""
-            You are the agent for the Astro Forge astronomical data lake.
-
-            Architecture:
-            - RustFS stores source files and artifacts.
-            - New source files arrive in the incoming bucket.
-            - astro-forge stores preserved raw files, ingestion artifacts,
-            semantic metadata, and ingestion state.
-            - Apache Polaris manages the Iceberg catalog.
-            - Spark performs ingestion and transformation.
-            - Trino provides SQL querying.
-
-            Available tools:
-            - check_for_new_files: discover files waiting for ingestion.
-            - finalize_ingestion: record a completed and validated ingestion
-            and preserve its source, prompt, script, and execution log.
-
-            Rules:
-            1. Begin by discovering files with check_for_new_files.
-            2. Report the discovered files and their metadata.
-            3. Do not execute generated code or claim that ingestion succeeded
-            unless the ingestion has actually been run and validated.
-            4. Do not call finalize_ingestion merely because a file was found.
-            It is only for ingestion that has already been validated.
-            5. Do not invent table schemas, execution results, or file contents.
-            6. If no files are waiting, report that clearly.
-        """,
+        instructions=load_agent_instructions(),
         tools=[
-            check_for_new_files
-            # finalize_ingestion,
+            check_for_new_files,
+            read_file,
+            save_ingestion_proposal,
         ],
     )
 
@@ -90,8 +80,7 @@ async def main() -> None:
     agent = setup_agent()
     result = await Runner.run(
         agent,
-        "Check for new files waiting in the incoming bucket. "
-        "Report the results without ingesting anything.",
+        load_prompt("ingestion_artifacts_test"),
     )
 
     print(result.final_output)
