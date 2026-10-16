@@ -79,7 +79,7 @@ services:
       - rustfs
       - polaris
     ports:
-      - "8080:8080"
+      - "9999:8080"
     environment:
       AWS_ACCESS_KEY_ID: ${RUSTFS_ACCESS_KEY}
       AWS_SECRET_ACCESS_KEY: ${RUSTFS_SECRET_KEY}
@@ -104,6 +104,9 @@ services:
       AWS_ACCESS_KEY_ID: ${RUSTFS_ACCESS_KEY}
       AWS_SECRET_ACCESS_KEY: ${RUSTFS_SECRET_KEY}
       AWS_REGION: ${AWS_REGION}
+
+      POLARIS_CLIENT_ID: ${POLARIS_CLIENT_ID}
+      POLARIS_CLIENT_SECRET: ${POLARIS_CLIENT_SECRET}
 
       RUSTFS_ENDPOINT: http://rustfs:9000
       RUSTFS_INCOMING_BUCKET: incoming

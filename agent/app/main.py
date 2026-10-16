@@ -6,15 +6,12 @@ from openai import AsyncOpenAI
 from agents import (
     Agent,
     Runner,
-    set_default_openai_api,
-    set_default_openai_client,
     set_tracing_disabled,
 )
 from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
 from app.rustfs_tools import (
     check_for_new_files,
     read_file,
-    save_ingestion_proposal,
     save_ingestion_artifacts,
 )
 
@@ -69,7 +66,7 @@ def setup_agent() -> Agent:
         tools=[
             check_for_new_files,
             read_file,
-            save_ingestion_proposal,
+            save_ingestion_artifacts,
         ],
     )
 
@@ -81,6 +78,7 @@ async def main() -> None:
     result = await Runner.run(
         agent,
         load_prompt("ingestion_artifacts_test"),
+        max_turns=15
     )
 
     print(result.final_output)

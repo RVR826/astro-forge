@@ -59,15 +59,16 @@ For each source file, create the following artifacts:
 4. `semantic-metadata.md` — human-readable documentation of the dataset and proposed column meanings.
 5. `ingest.py` — a proposed Spark ingestion script. It is a draft for review, not an executed script.
 
-Clearly distinguish direct observations from hypotheses. Do not invent units, coordinate systems, reference frames, epochs, or scientific meanings. If the evidence is insufficient, state what remains unknown. Do not claim that the proposed schema or script has been validated against the full file.
+Clearly distinguish direct observations from hypotheses. Do not invent units, coordinate systems, reference frames, epochs, or scientific meanings. You can search the web for supporting information about the data types, standard units in the field or meanings tied to them. If the evidence is insufficient, state what remains unknown. Do not claim that the proposed schema or script has been validated against the full file.
+**Please review the artifacts for completeness and consistency before saving!**
 
-### 4. Save the proposal artifacts
+### 4. Save the ingestion artifacts
 
-Call `save_ingestion_proposal()` with the exact `source_key`, the profile serialized as JSON text, and the complete text of each Markdown/Python artifact.
+Call `save_ingestion_artifacts()` with the exact `source_key`, the profile serialized as JSON text, and the complete text of each Markdown/Python artifact.
 
-The proposal-saving tool should store the artifacts in the configured data bucket (`astro-forge` by default), under a unique prefix like:
+The artifact-saving tool should store the artifacts in the configured data bucket (`astro-forge` by default), under a unique prefix like:
 
-`metadata/proposals/<proposal-id>-<source-filename>/`
+`metadata/system/<proposal-id>-<source-filename>/`
 
 Expected objects:
 
@@ -79,17 +80,7 @@ Expected objects:
 
 Use the exact object keys returned by the saving tool in your final report.
 
-**Important:** the current `save_ingestion_artifacts()` tool is a finalization tool, not a proposal-saving tool. It copies the source to `raw/`, updates ingestion state to `success`, and is documented for use only after a validated Spark ingestion. Do not call it during this proposal-only workflow. Use a separate `save_ingestion_proposal()` tool for the review artifacts.
-
-### 5. Safety and reporting
-
-- Never execute `ingest.py`.
-- Never create or modify Iceberg tables.
-- Never update ingestion state or mark a source as successfully ingested.
-- Never call `save_ingestion_artifacts()` in this workflow.
-- Do not overwrite or delete the incoming source file.
-- If a tool fails, report the error and do not claim the artifacts were saved.
-- In the final response, summarize each file inspected, what was inferred, any important uncertainty, and the saved artifact locations.
+### 5. Stop after the save operation. Report the result and the location of the saved artifacts.
 
 ## Profile JSON shape
 
@@ -106,3 +97,39 @@ Use a structure similar to this, populated with actual findings:
 ```
 
 Each observation or inference should be specific and supported by evidence from the sample. Include confidence where useful. These arrays are examples of structure, not findings to copy verbatim.
+
+## General artifact quality requirements
+
+Every artifact must be complete, specific to the current source file, and based on the profiling evidence.
+
+- Never save placeholder content, dummy implementations, TODO-only scripts, or examples that do not implement the proposed ingestion.
+- The semantic metadata must document each identified column, observed values, likely meaning, evidence, confidence, and unresolved questions.
+- The proposal must explain the reasoning behind the schema and transformations.
+- Do not invent facts to fill gaps. If evidence is insufficient, document the uncertainty and request more inspection.
+- Before calling `save_ingestion_artifacts()`, review all five artifacts for completeness and source-specific content.
+- If a complete artifact cannot be produced, do not save a misleading placeholder. Explain what is missing instead.
+
+## Requirements for the generated Spark script
+
+The generated `ingest.py` must be a complete implementation, not a sketch or illustrative example.
+
+- Do not leave TODOs, placeholder functions, dummy statements, ellipses, or unimplemented branches.
+- Do not use statements such as `print("dummy ingestion")` in place of actual ingestion logic.
+- Implement parsing based on the actual source format and observed structure.
+- Define an explicit, appropriate schema where possible. Handle headers, delimiters, comments, missing values, and malformed records according to the source format.
+- Include meaningful error handling and validation. Do not silently discard data or invent column meanings.
+- Use the project's existing Spark configuration helper:
+  `create_spark_session`, defined in `spark_config.py` inside the Spark container.
+- Import and call `create_spark_session()` rather than constructing a separate Spark session or duplicating its configuration.
+- Use the configured Iceberg catalog and storage integration for the intended target table. Do not hardcode credentials or invent configuration values that are not available.
+- Include the required read, transformation, validation, and Iceberg write operations. Make the target namespace and table explicit, using the project's established naming conventions when they are known.
+- Ensure the script can be run as a standalone ingestion job in the intended Spark container, subject to the project's configured environment.
+- If a necessary configuration or source-format detail is unavailable, do not fabricate it. Explain the limitation rather than disguising an incomplete implementation as finished.
+
+### Execution and safety boundary
+
+**Saving artifacts is the final operation. Do not execute `ingest.py` or any generated code.**
+
+Do not submit the generated script to Spark, run `spark-submit`, use `exec()` or `eval()` on generated content, create or overwrite Iceberg tables, or trigger the ingestion job indirectly.
+
+Use `save_ingestion_artifacts()` only after completing the artifacts. After it returns, stop the workflow and report its result. Do not call the tool again to retry ingestion or perform any post-save execution.
