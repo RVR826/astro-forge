@@ -97,6 +97,8 @@ services:
     command: ["tail", "-f", "/dev/null"]
     depends_on:
       - spark
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
       OPENROUTER_MODEL: ${OPENROUTER_MODEL}

@@ -3,7 +3,7 @@ import os
 import uuid
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
-
+from app.spark_tools import build_ingestion_script
 import boto3
 from botocore.exceptions import ClientError
 from agents import function_tool
@@ -217,8 +217,8 @@ def check_for_new_files() -> str:
             # Skip only when a previous successful ingestion has
             # the same ETag.
             if (
-                previous is not None
-                and previous.get("status") == "success"
+                previous
+                and previous.get("status") in ("success", "artifacts_saved")
                 and previous.get("etag") == etag
             ):
                 continue
@@ -255,8 +255,9 @@ def check_for_new_files() -> str:
 def read_file(
     source_key: str,
     start_byte: int = 0,
-    max_bytes: int = 16384,
+    max_bytes: int = 65536,
     bucket: str = "",
+    read_count = 0
 ) -> str:
     """Read a bounded byte range from a RustFS object.
 
@@ -272,6 +273,11 @@ def read_file(
     if start_byte < 0:
         return json.dumps({
             "error": "start_byte must be non-negative"
+        })
+
+    if read_count > 5: 
+        return json.dumps({
+            "error": "a single file can be read max. 5 times. please proceed with the next step in the instructions"
         })
 
     # Restrict reads to the configured data buckets.
@@ -331,6 +337,7 @@ def read_file(
             "bytes_read": bytes_read,
             "next_start_byte": next_start_byte,
             "eof": next_start_byte >= file_size,
+            "next_read_count": read_count + 1,
             "note": (
                 "Content is a raw byte-range sample decoded as UTF-8. "
                 "A range may begin or end partway through a line or "
@@ -351,27 +358,66 @@ def read_file(
 def save_ingestion_artifacts(
     source_key: str,
     prompt: str,
-    ingestion_script: str,
-    execution_log: str,
+    source_specific_logic: str,
+    profile_json: str,
+    semantic_metadata: str,
+    proposal: str,
     target_table: str,
 ) -> str:
     """
-    Finalize an already validated ingestion.
+    Save all generated ingestion artifacts to RustFS.
 
-    The source is copied from the incoming bucket to:
-        astro-forge/raw/<uuid>-<filename>/<filename>
+    The source and generated artifacts are saved under:
+        astro-forge/raw/<uuid>-<filename>/
 
-    The prompt, generated script, and execution log are saved
-    alongside the source copy.
+    Artifacts:
+        <filename>             Original source file
+        ingest.py              Generated Spark ingestion script
+        profile.json           Source data profile
+        semantic-metadata.md   Semantic table and column metadata
+        prompt.md              Exact prompt used for generation
+        proposal.md            Ingestion design proposal
 
-    The state record is written to:
-        astro-forge/metadata/system/ingestion-state.json
+    The ingestion state is updated to:
+        status = artifacts_saved
 
-    Call this tool only after Spark ingestion and the resulting
-    Iceberg table have been successfully validated.
+    The ingestion script is assembled deterministically from
+    spark_template.py and the LLM-generated source-specific logic.
+    This function does NOT execute the generated script or validate
+    the resulting Iceberg table.
     """
+    ingestion_script = build_ingestion_script(
+        source_specific_logic,
+        target_table,
+    )
 
-    # Verify that the source exists in the incoming bucket.
+    # 1. Validate inputs.
+    required_artifacts = {
+        "prompt.md": prompt,
+        "ingest.py": ingestion_script,
+        "profile.json": profile_json,
+        "semantic-metadata.md": semantic_metadata,
+        "proposal.md": proposal,
+    }
+
+    for artifact_name, content in required_artifacts.items():
+        if not isinstance(content, str) or not content.strip():
+            raise ValueError(
+                f"Artifact '{artifact_name}' is empty or invalid."
+            )
+
+    # Ensure profile.json is valid JSON.
+    try:
+        json.loads(profile_json)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"profile.json contains invalid JSON: {exc}"
+        ) from exc
+
+    if not source_key:
+        raise ValueError("source_key cannot be empty.")
+
+    # 2. Verify that the source exists in the incoming bucket.
     source = s3.head_object(
         Bucket=INCOMING_BUCKET,
         Key=source_key,
@@ -379,7 +425,7 @@ def save_ingestion_artifacts(
 
     source_etag = source.get("ETag", "").strip('"')
 
-    # Generate a unique ID for this ingestion run.
+    # 3. Generate a unique ID for this artifact run.
     ingestion_id = str(uuid.uuid4())
 
     raw_prefix = _raw_artifact_prefix(
@@ -388,14 +434,20 @@ def save_ingestion_artifacts(
     )
 
     source_filename = _source_filename(source_key)
-
     source_destination = f"{raw_prefix}{source_filename}"
 
-    prompt_key = f"{raw_prefix}prompt.md"
-    script_key = f"{raw_prefix}ingest.py"
-    log_key = f"{raw_prefix}execution.log"
+    # Artifact locations.
+    artifact_keys = {
+        "source": source_destination,
+        "prompt": f"{raw_prefix}prompt.md",
+        "ingestion_script": f"{raw_prefix}ingest.py",
+        "profile": f"{raw_prefix}profile.json",
+        "semantic_metadata": f"{raw_prefix}semantic-metadata.md",
+        "proposal": f"{raw_prefix}proposal.md",
+        "execution_log": f"{raw_prefix}execution.log",
+    }
 
-    # 1. Preserve the source in astro-forge/raw.
+    # 4. Preserve the original source file.
     s3.copy_object(
         Bucket=DATA_BUCKET,
         CopySource={
@@ -405,46 +457,65 @@ def save_ingestion_artifacts(
         Key=source_destination,
     )
 
-    # 2. Save the exact prompt used for code generation.
+    # 5. Upload all generated artifacts.
     _upload_text(
-        prompt_key,
+        artifact_keys["prompt"],
         prompt,
         "text/markdown",
     )
 
-    # 3. Save the generated ingestion script.
     _upload_text(
-        script_key,
+        artifact_keys["ingestion_script"],
         ingestion_script,
         "text/x-python",
     )
 
-    # 4. Save the execution log.
     _upload_text(
-        log_key,
+        artifact_keys["profile"],
+        profile_json,
+        "application/json",
+    )
+
+    _upload_text(
+        artifact_keys["semantic_metadata"],
+        semantic_metadata,
+        "text/markdown",
+    )
+
+    _upload_text(
+        artifact_keys["proposal"],
+        proposal,
+        "text/markdown",
+    )
+
+    # No Spark execution is performed at this stage.
+    execution_log = (
+        "Execution status: NOT EXECUTED\n"
+        "The generated ingestion script has been saved but has not "
+        "been executed in Spark.\n"
+        "Iceberg table validation: NOT PERFORMED\n"
+    )
+
+    _upload_text(
+        artifact_keys["execution_log"],
         execution_log,
         "text/plain",
     )
 
-    # 5. Verify that all expected artifacts exist before
-    #    recording the ingestion as successful.
-    for key in (
-        source_destination,
-        prompt_key,
-        script_key,
-        log_key,
-    ):
+    # 6. Verify that every expected object exists.
+    for key in artifact_keys.values():
         s3.head_object(
             Bucket=DATA_BUCKET,
             Key=key,
         )
 
-    # 6. Update state in astro-forge.
+    # 7. Update ingestion state.
     state = load_ingestion_state()
     processed = state["processed"]
 
     processed[source_key] = {
-        "status": "success",
+        "status": "artifacts_saved",
+        "execution_performed": False,
         "ingestion_id": ingestion_id,
         "source_bucket": INCOMING_BUCKET,
         "source": source_key,
@@ -452,25 +523,32 @@ def save_ingestion_artifacts(
         "processed_at": utc_now(),
         "raw_bucket": DATA_BUCKET,
         "raw_location": source_destination,
-        "prompt": prompt_key,
-        "ingestion_script": script_key,
-        "execution_log": log_key,
+        "prompt": artifact_keys["prompt"],
+        "ingestion_script": artifact_keys["ingestion_script"],
+        "profile": artifact_keys["profile"],
+        "semantic_metadata": artifact_keys["semantic_metadata"],
+        "proposal": artifact_keys["proposal"],
+        "execution_log": artifact_keys["execution_log"],
         "target_table": target_table,
     }
 
     save_ingestion_state(state)
 
+    # 8. Return the artifact locations.
     return json.dumps(
         {
-            "status": "success",
+            "status": "artifacts_saved",
+            "execution_performed": False,
             "ingestion_id": ingestion_id,
             "source_bucket": INCOMING_BUCKET,
             "source": source_key,
             "raw_bucket": DATA_BUCKET,
             "raw_location": source_destination,
-            "prompt": prompt_key,
-            "ingestion_script": script_key,
-            "execution_log": log_key,
+            "artifacts": {
+                name: key
+                for name, key in artifact_keys.items()
+                if name != "source"
+            },
             "state_bucket": DATA_BUCKET,
             "state_key": STATE_KEY,
             "target_table": target_table,

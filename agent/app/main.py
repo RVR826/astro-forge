@@ -1,58 +1,28 @@
 import asyncio
-import os
-
-from pathlib import Path
+import app.agent_utils as utils
 from openai import AsyncOpenAI
 from agents import (
     Agent,
-    Runner,
     set_tracing_disabled,
 )
 from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
+from openai.types.responses import ResponseTextDeltaEvent
 from app.rustfs_tools import (
     check_for_new_files,
     read_file,
     save_ingestion_artifacts,
 )
 
-OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
-OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL")
-
-def load_agent_instructions() -> str:
-    instructions_path = (
-        Path(__file__).resolve().parent.parent / "prompts" / "agent_instructions.md"
-    )
-    return instructions_path.read_text(encoding="utf-8")
-
-def load_prompt(prompt_name: str) -> str:
-    prompt_path = (
-        Path(__file__).resolve().parent.parent / "prompts" / f"{prompt_name}.md"
-    )
-    return prompt_path.read_text(encoding="utf-8")
-
 def setup_client() -> AsyncOpenAI:
-    if not OPENROUTER_API_KEY:
-        raise RuntimeError("OPENROUTER_API_KEY is not configured")
-
-    if not OPENROUTER_MODEL:
-        raise RuntimeError(
-            "OPENROUTER_MODEL is not configured. "
-            "Set it to a model ID available through OpenRouter."
-        )
-
-
     return AsyncOpenAI(
-        base_url="https://openrouter.ai/api/v1",
-        api_key=OPENROUTER_API_KEY,
-        default_headers={
-            "X-OpenRouter-Title": "Astro Forge Data Lake",
-    }
-)
+        base_url="http://host.docker.internal:8080/v1",
+        api_key="dummy_key"
+    )
 
 def setup_agent() -> Agent:
     client = setup_client()
     model = OpenAIChatCompletionsModel(
-        model=OPENROUTER_MODEL,
+        model="unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:Q8_0",
         openai_client=client
     )
 
@@ -62,7 +32,7 @@ def setup_agent() -> Agent:
     return Agent(
         name="Astronomy Data Ingestion Agent",
         model=model,
-        instructions=load_agent_instructions(),
+        instructions=utils.load_agent_instructions(),
         tools=[
             check_for_new_files,
             read_file,
@@ -72,17 +42,8 @@ def setup_agent() -> Agent:
 
 
 async def main() -> None:
-    print(f"Model: {OPENROUTER_MODEL}")
-
     agent = setup_agent()
-    result = await Runner.run(
-        agent,
-        load_prompt("ingestion_artifacts_test"),
-        max_turns=15
-    )
-
-    print(result.final_output)
-
+    await utils.run_agent(agent, utils.load_prompt("ingestion_artifacts_test"))
 
 if __name__ == "__main__":
     asyncio.run(main())

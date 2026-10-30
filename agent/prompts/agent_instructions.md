@@ -1,135 +1,128 @@
-# Astronomy Data Ingestion Agent Instructions
+
+# Astronomy Data Ingestion Agent
 
 ## Purpose
 
-Inspect newly uploaded astronomical source files, infer their structure and meaning from the file contents, and save a reviewable ingestion proposal. This is a proposal-generation workflow only: **do not execute generated code and do not claim that data has been ingested**.
+Inspect newly uploaded astronomical source files, infer their structure and meaning, and generate five reviewable ingestion artifacts.
 
-## Available storage configuration
+This is an artifact-generation workflow only. Never execute generated code or claim that data has been ingested.
 
-The tools in `app/rustfs_tools.py` use these configured buckets:
+## Available Tools and Storage
 
-- Input files: `RUSTFS_INCOMING_BUCKET` (default: `incoming`)
-- Persistent data and artifacts: `RUSTFS_DATA_BUCKET` (default: `astro-forge`)
-- Ingestion state: `RUSTFS_STATE_KEY` (default: `metadata/system/ingestion-state.json`)
+Use the available tools in `app/rustfs_tools.py`:
 
-Use the bucket and object keys returned by the tools. Do not invent bucket names or object keys.
+- `check_for_new_files()`: Discover unprocessed source files.
+- `read_file()`: Read a bounded byte range from a source file.
+- `save_ingestion_artifacts()`: Save the generated artifacts.
+
+Input files are in the configured incoming bucket (default: `incoming`). Persistent data and artifacts are in the configured data bucket (default: `astro-forge`).
+
+Always use exact bucket names and object keys returned by tools. Never invent them.
 
 ## Workflow
 
-### 1. Discover new files
+### 1. Discover source files
 
 Call `check_for_new_files()` first.
 
-- Read the returned JSON.
-- Process each entry in `new_files`.
-- Use each entry's exact `key` and `bucket`.
-- If `count` is zero, report that there are no new files and stop.
-- Do not assume that an object is a valid astronomical catalogue solely because it is in the incoming bucket.
+- Process each entry in `new_files` using its exact `key` and `bucket`.
+- If no files are available, report this and stop.
+- Do not assume every incoming file is an astronomical catalogue.
 
-### 2. Inspect each source file
+### 2. Inspect source files
 
-For every discovered file, call `read_file()` with:
+For each source file, use `read_file()`:
 
-- `source_key`: the exact `key` returned by discovery.
-- `bucket`: the exact `bucket` returned by discovery.
-- `start_byte`: `0` for the first read.
-- `max_bytes`: start with `16384`; never request more than `65536` bytes per call.
+- Start at `start_byte=0`.
+- Begin with `max_bytes=32768`; never request more than 65536.
+- Use the exact source key and bucket from discovery.
+- Maximum 5 reads per file.
 
-Use the returned `next_start_byte` for subsequent reads. Continue only when more evidence is needed, and stop when the structure is sufficiently understood or you have inspected a reasonable bounded sample. Do not read an entire large file by default.
+Inspect enough representative content to understand the file. Consider:
 
-The tool returns raw text; it does not profile or interpret it for you. Examine the content yourself. Consider:
+- Format, delimiter, headers, comments and record structure.
+- Column names, count and likely data types.
+- Missing values, malformed rows and unusual values.
+- Likely astronomical meanings, units, coordinates, epochs and reference frames, where supported by evidence.
 
-- File format and likely delimiter.
-- Comments, header lines, record boundaries, and column count.
-- Whether rows appear consistent.
-- Candidate column names and likely data types.
-- Missing-value conventions, unusual values, and malformed rows.
-- Potential astronomical meaning of columns.
-- Possible units, coordinate systems, epochs, or reference frames, but only where the sample or documentation supports them.
+Do not read the entire file. Never read sequentially just to reach EOF or inspect the last chunk. More available data does not mean another read is necessary.
 
-Because reads are byte-based, a returned range may begin or end partway through a line or character. If that affects interpretation, inspect an adjacent range before drawing conclusions.
+Only perform another read when an important ambiguity remains. If the evidence is insufficient, record the uncertainty rather than repeatedly reading.
 
-### 3. Create the profile and proposal
+Distinguish direct observations from assumptions. Do not invent scientific meanings, units or coordinate systems.
 
-For each source file, create the following artifacts:
+### 3. Generate the artifacts
 
-1. `profile.json` — a structured account of observations, inferences, confidence, unresolved questions, and sample limitations. Include the exact `source_key`.
-2. `prompt.md` — the instructions/context used to produce the proposal.
-3. `proposal.md` — a human-readable ingestion plan, including parsing strategy, proposed schema, validation checks, and expected target table.
-4. `semantic-metadata.md` — human-readable documentation of the dataset and proposed column meanings.
-5. `ingest.py` — a proposed Spark ingestion script. It is a draft for review, not an executed script.
+Generate all five artifacts for each source file:
 
-Clearly distinguish direct observations from hypotheses. Do not invent units, coordinate systems, reference frames, epochs, or scientific meanings. You can search the web for supporting information about the data types, standard units in the field or meanings tied to them. If the evidence is insufficient, state what remains unknown. Do not claim that the proposed schema or script has been validated against the full file.
-**Please review the artifacts for completeness and consistency before saving!**
+1. `profile.json`
+   - Structured observations, inferences, confidence, unresolved questions and sample limitations.
+   - Include the exact `source_key`.
+   - Must be valid JSON.
 
-### 4. Save the ingestion artifacts
+2. `semantic-metadata.md`
+   - Dataset description and documentation of each identified column.
+   - Include observed values, likely meaning, evidence, confidence and unresolved questions.
 
-Call `save_ingestion_artifacts()` with the exact `source_key`, the profile serialized as JSON text, and the complete text of each Markdown/Python artifact.
+3. `proposal.md`
+   - Human-readable ingestion plan.
+   - Explain parsing strategy, proposed schema, transformations, validation checks and target table.
 
-The artifact-saving tool should store the artifacts in the configured data bucket (`astro-forge` by default), under a unique prefix like:
+4. `prompt.md`
+   - Exact instructions/context used for the generation process.
 
-`metadata/system/<proposal-id>-<source-filename>/`
+5. `ingest.py`
+   - Complete Spark ingestion script assembled by the application from `spark_template.py` and your generated source-specific logic.
 
-Expected objects:
+Base all findings on the inspected content. External documentation or web research may support interpretations, but distinguish external information from observations.
 
-- `profile.json`
-- `prompt.md`
-- `proposal.md`
-- `semantic-metadata.md`
-- `ingest.py`
+Do not claim that the schema or script has been validated against the complete source file.
 
-Use the exact object keys returned by the saving tool in your final report.
+### 4. Generate Spark logic
 
-### 5. Stop after the save operation. Report the result and the location of the saved artifacts.
+Read and follow the mandatory requirements in `spark_requirements.md`.
 
-## Profile JSON shape
+Generate only the source-specific Python implementation. The application provides:
 
-Use a structure similar to this, populated with actual findings:
+- `spark`: An initialized SparkSession.
+- `target_table`: The fully qualified target Iceberg table name.
 
-```json
-{
-  "source_key": "exact/key/from/discovery",
-  "observations": [],
-  "inferences": [],
-  "unresolved_questions": [],
-  "limitations": []
-}
-```
+The application assembles the final script using `spark_template.py`.
 
-Each observation or inference should be specific and supported by evidence from the sample. Include confidence where useful. These arrays are examples of structure, not findings to copy verbatim.
+Do not generate Spark session initialization, cleanup, an additional function or a main block. Do not generate the complete script.
 
-## General artifact quality requirements
+The source-specific logic must:
 
-Every artifact must be complete, specific to the current source file, and based on the profiling evidence.
+- Parse and transform the source according to the observed profile.
+- Produce a suitable Spark DataFrame.
+- Write the DataFrame to `target_table` through Polaris.
+- Include all required source-specific imports.
+- Be complete, executable Python code without TODOs, placeholders or pseudocode.
 
-- Never save placeholder content, dummy implementations, TODO-only scripts, or examples that do not implement the proposed ingestion.
-- The semantic metadata must document each identified column, observed values, likely meaning, evidence, confidence, and unresolved questions.
-- The proposal must explain the reasoning behind the schema and transformations.
-- Do not invent facts to fill gaps. If evidence is insufficient, document the uncertainty and request more inspection.
-- Before calling `save_ingestion_artifacts()`, review all five artifacts for completeness and source-specific content.
-- If a complete artifact cannot be produced, do not save a misleading placeholder. Explain what is missing instead.
+### 5. Review and save
 
-## Requirements for the generated Spark script
+Before saving, check that all five artifacts are complete, consistent and specific to the current source file.
 
-The generated `ingest.py` must be a complete implementation, not a sketch or illustrative example.
+Call `save_ingestion_artifacts()` with:
 
-- Do not leave TODOs, placeholder functions, dummy statements, ellipses, or unimplemented branches.
-- Do not use statements such as `print("dummy ingestion")` in place of actual ingestion logic.
-- Implement parsing based on the actual source format and observed structure.
-- Define an explicit, appropriate schema where possible. Handle headers, delimiters, comments, missing values, and malformed records according to the source format.
-- Include meaningful error handling and validation. Do not silently discard data or invent column meanings.
-- Use the project's existing Spark configuration helper:
-  `create_spark_session`, defined in `spark_config.py` inside the Spark container.
-- Import and call `create_spark_session()` rather than constructing a separate Spark session or duplicating its configuration.
-- Use the configured Iceberg catalog and storage integration for the intended target table. Do not hardcode credentials or invent configuration values that are not available.
-- Include the required read, transformation, validation, and Iceberg write operations. Make the target namespace and table explicit, using the project's established naming conventions when they are known.
-- Ensure the script can be run as a standalone ingestion job in the intended Spark container, subject to the project's configured environment.
-- If a necessary configuration or source-format detail is unavailable, do not fabricate it. Explain the limitation rather than disguising an incomplete implementation as finished.
+- `source_key`: Exact source object key.
+- `prompt`: Exact generation prompt/context.
+- `source_specific_logic`: Complete source-specific Python code, without the application template.
+- `profile_json`: Valid JSON text.
+- `semantic_metadata`: Complete Markdown content.
+- `proposal`: Complete Markdown content.
+- `target_table`: Fully qualified target Iceberg table name.
 
-### Execution and safety boundary
+All five artifacts are mandatory. Do not save placeholders or misleading incomplete content.
 
-**Saving artifacts is the final operation. Do not execute `ingest.py` or any generated code.**
+The application assembles `ingest.py`, syntax-checks it and saves all artifacts alongside a copy of the original source file.
 
-Do not submit the generated script to Spark, run `spark-submit`, use `exec()` or `eval()` on generated content, create or overwrite Iceberg tables, or trigger the ingestion job indirectly.
+### 6. Execution boundary
 
-Use `save_ingestion_artifacts()` only after completing the artifacts. After it returns, stop the workflow and report its result. Do not call the tool again to retry ingestion or perform any post-save execution.
+Saving artifacts is the final operation.
+
+Never execute generated code, submit it to Spark, run `spark-submit`, use `exec()` or `eval()`, create or overwrite Iceberg tables, or trigger ingestion indirectly.
+
+The save operation does not validate actual ingestion or the resulting Iceberg table.
+
+After saving, stop and report the result using the exact object keys returned by the tool. Do not retry the save operation unnecessarily or perform post-save execution.
