@@ -1,9 +1,10 @@
 import json
 import os
 import uuid
+import ast
+import re
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
-from app.spark_tools import build_ingestion_script
 import boto3
 from botocore.exceptions import ClientError
 from agents import function_tool
@@ -159,16 +160,80 @@ def _upload_text(
     )
 
 
-def _object_etag(bucket: str, key: str) -> str:
-    """Return an object's ETag without surrounding quotes."""
+def _validate_profile(profile_json: str, source_key: str) -> dict:
+    """Validate profile JSON and its package-name-only dependencies."""
 
-    response = s3.head_object(
-        Bucket=bucket,
-        Key=key,
-    )
+    profile = json.loads(profile_json)
 
-    return response.get("ETag", "").strip('"')
+    if not isinstance(profile, dict):
+        raise ValueError("profile.json must contain a JSON object")
 
+    if profile.get("source_key") != source_key:
+        raise ValueError("profile.json source_key does not match source_key")
+
+    dependencies = profile.get("dependencies", [])
+
+    if not isinstance(dependencies, list):
+        raise ValueError("'dependencies' must be a list of package names")
+
+    package_pattern = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+    normalized = []
+    for package in dependencies:
+        if (
+            not isinstance(package, str)
+            or not package
+            or not package_pattern.fullmatch(package)
+        ):
+            raise ValueError(
+                f"Invalid dependency package name: {package!r}. "
+                "Provide package names only, without versions or URLs."
+            )
+
+        normalized.append(package)
+
+    if len(normalized) != len(set(name.lower() for name in normalized)):
+        raise ValueError("Duplicate dependencies are not allowed")
+
+    profile["dependencies"] = normalized
+    return profile
+
+
+def _validate_source_loader(source_loader_script: str) -> None:
+    """Check loader syntax and its required public interface."""
+
+    try:
+        tree = ast.parse(source_loader_script)
+    except SyntaxError as exc:
+        raise ValueError(
+            f"Generated source_loader.py has invalid Python syntax: {exc}"
+        ) from exc
+
+    loaders = [
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "load_data"
+    ]
+
+    if len(loaders) != 1:
+        raise ValueError(
+            "source_loader.py must define exactly one top-level "
+            "load_data() function"
+        )
+
+    args = loaders[0].args
+
+    if (
+        [arg.arg for arg in args.args] != ["spark", "source_path"]
+        or args.posonlyargs
+        or args.vararg
+        or args.kwarg
+        or args.kwonlyargs
+    ):
+        raise ValueError(
+            "load_data() must have exactly this interface: "
+            "load_data(spark, source_path)"
+        )
 
 # ---------------------------------------------------------
 # Agent tools
@@ -358,96 +423,55 @@ def read_file(
 def save_ingestion_artifacts(
     source_key: str,
     prompt: str,
-    source_specific_logic: str,
+    source_loader_script: str,
     profile_json: str,
     semantic_metadata: str,
     proposal: str,
     target_table: str,
 ) -> str:
     """
-    Save all generated ingestion artifacts to RustFS.
+    Save the source file and generated ingestion artifacts.
 
-    The source and generated artifacts are saved under:
-        astro-forge/raw/<uuid>-<filename>/
-
-    Artifacts:
-        <filename>             Original source file
-        ingest.py              Generated Spark ingestion script
-        profile.json           Source data profile
-        semantic-metadata.md   Semantic table and column metadata
-        prompt.md              Exact prompt used for generation
-        proposal.md            Ingestion design proposal
-
-    The ingestion state is updated to:
-        status = artifacts_saved
-
-    The ingestion script is assembled deterministically from
-    spark_template.py and the LLM-generated source-specific logic.
-    This function does NOT execute the generated script or validate
-    the resulting Iceberg table.
+    This operation does not execute the generated loader.
     """
-    ingestion_script = build_ingestion_script(
-        source_specific_logic,
+
+    # Validate generated artifacts before writing anything.
+    profile = _validate_profile(profile_json, source_key)
+    _validate_source_loader(source_loader_script)
+
+    if not all(isinstance(value, str) and value.strip() for value in (
+        prompt,
+        source_loader_script,
+        profile_json,
+        semantic_metadata,
+        proposal,
         target_table,
-    )
+    )):
+        raise ValueError("All artifact contents and target_table are required")
 
-    # 1. Validate inputs.
-    required_artifacts = {
-        "prompt.md": prompt,
-        "ingest.py": ingestion_script,
-        "profile.json": profile_json,
-        "semantic-metadata.md": semantic_metadata,
-        "proposal.md": proposal,
-    }
-
-    for artifact_name, content in required_artifacts.items():
-        if not isinstance(content, str) or not content.strip():
-            raise ValueError(
-                f"Artifact '{artifact_name}' is empty or invalid."
-            )
-
-    # Ensure profile.json is valid JSON.
-    try:
-        json.loads(profile_json)
-    except json.JSONDecodeError as exc:
-        raise ValueError(
-            f"profile.json contains invalid JSON: {exc}"
-        ) from exc
-
-    if not source_key:
-        raise ValueError("source_key cannot be empty.")
-
-    # 2. Verify that the source exists in the incoming bucket.
+    # Verify the original source exists.
     source = s3.head_object(
         Bucket=INCOMING_BUCKET,
         Key=source_key,
     )
-
     source_etag = source.get("ETag", "").strip('"')
 
-    # 3. Generate a unique ID for this artifact run.
-    ingestion_id = str(uuid.uuid4())
-
-    raw_prefix = _raw_artifact_prefix(
-        source_key,
-        ingestion_id,
-    )
-
+    proposal_id = str(uuid.uuid4())
+    raw_prefix = _raw_artifact_prefix(source_key, proposal_id)
     source_filename = _source_filename(source_key)
+
     source_destination = f"{raw_prefix}{source_filename}"
 
-    # Artifact locations.
     artifact_keys = {
-        "source": source_destination,
-        "prompt": f"{raw_prefix}prompt.md",
-        "ingestion_script": f"{raw_prefix}ingest.py",
+        "source_loader": f"{raw_prefix}source_loader.py",
         "profile": f"{raw_prefix}profile.json",
-        "semantic_metadata": f"{raw_prefix}semantic-metadata.md",
+        "prompt": f"{raw_prefix}prompt.md",
         "proposal": f"{raw_prefix}proposal.md",
+        "semantic_metadata": f"{raw_prefix}semantic-metadata.md",
         "execution_log": f"{raw_prefix}execution.log",
     }
 
-    # 4. Preserve the original source file.
+    # Preserve the original source.
     s3.copy_object(
         Bucket=DATA_BUCKET,
         CopySource={
@@ -457,28 +481,22 @@ def save_ingestion_artifacts(
         Key=source_destination,
     )
 
-    # 5. Upload all generated artifacts.
+    # Save the five generated artifacts.
     _upload_text(
-        artifact_keys["prompt"],
-        prompt,
-        "text/markdown",
-    )
-
-    _upload_text(
-        artifact_keys["ingestion_script"],
-        ingestion_script,
+        artifact_keys["source_loader"],
+        source_loader_script,
         "text/x-python",
     )
 
     _upload_text(
         artifact_keys["profile"],
-        profile_json,
+        json.dumps(profile, indent=2, ensure_ascii=False),
         "application/json",
     )
 
     _upload_text(
-        artifact_keys["semantic_metadata"],
-        semantic_metadata,
+        artifact_keys["prompt"],
+        prompt,
         "text/markdown",
     )
 
@@ -488,70 +506,68 @@ def save_ingestion_artifacts(
         "text/markdown",
     )
 
-    # No Spark execution is performed at this stage.
-    execution_log = (
-        "Execution status: NOT EXECUTED\n"
-        "The generated ingestion script has been saved but has not "
-        "been executed in Spark.\n"
-        "Iceberg table validation: NOT PERFORMED\n"
+    _upload_text(
+        artifact_keys["semantic_metadata"],
+        semantic_metadata,
+        "text/markdown",
     )
 
+    # Record explicitly that execution has not taken place.
     _upload_text(
         artifact_keys["execution_log"],
-        execution_log,
+        "Status: NOT EXECUTED\n"
+        "The source loader was generated and saved for review. "
+        "No Spark job was submitted.\n",
         "text/plain",
     )
 
-    # 6. Verify that every expected object exists.
-    for key in artifact_keys.values():
+    # Verify all saved objects.
+    expected_keys = [
+        source_destination,
+        *artifact_keys.values(),
+    ]
+
+    for key in expected_keys:
         s3.head_object(
             Bucket=DATA_BUCKET,
             Key=key,
         )
 
-    # 7. Update ingestion state.
+    # Update processing state.
     state = load_ingestion_state()
-    processed = state["processed"]
 
-    processed[source_key] = {
+    state["processed"][source_key] = {
         "status": "artifacts_saved",
-        "execution_performed": False,
-        "ingestion_id": ingestion_id,
+        "proposal_id": proposal_id,
         "source_bucket": INCOMING_BUCKET,
         "source": source_key,
         "etag": source_etag,
         "processed_at": utc_now(),
         "raw_bucket": DATA_BUCKET,
         "raw_location": source_destination,
-        "prompt": artifact_keys["prompt"],
-        "ingestion_script": artifact_keys["ingestion_script"],
-        "profile": artifact_keys["profile"],
-        "semantic_metadata": artifact_keys["semantic_metadata"],
-        "proposal": artifact_keys["proposal"],
-        "execution_log": artifact_keys["execution_log"],
+        "artifacts": artifact_keys,
         "target_table": target_table,
+        "dependencies": profile["dependencies"],
+        "execution_performed": False,
     }
 
     save_ingestion_state(state)
 
-    # 8. Return the artifact locations.
     return json.dumps(
         {
             "status": "artifacts_saved",
-            "execution_performed": False,
-            "ingestion_id": ingestion_id,
+            "proposal_id": proposal_id,
             "source_bucket": INCOMING_BUCKET,
             "source": source_key,
             "raw_bucket": DATA_BUCKET,
             "raw_location": source_destination,
-            "artifacts": {
-                name: key
-                for name, key in artifact_keys.items()
-                if name != "source"
-            },
+            "artifact_bucket": DATA_BUCKET,
+            "artifacts": artifact_keys,
             "state_bucket": DATA_BUCKET,
             "state_key": STATE_KEY,
             "target_table": target_table,
+            "dependencies": profile["dependencies"],
+            "execution_performed": False,
         },
         indent=2,
     )

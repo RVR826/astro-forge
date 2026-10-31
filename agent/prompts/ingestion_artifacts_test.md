@@ -1,58 +1,58 @@
-## Objective
+# Runner Prompt
 
-Discover and process new astronomical source files reported by `check_for_new_files()`.
+Discover and process new astronomical source files using `check_for_new_files()`.
 
 **Process exactly one source file per run.** If multiple files are returned, select one and leave the others for subsequent runs.
 
 ## Workflow
 
-1. Call `check_for_new_files()` and select one unprocessed source file from `new_files`.
-2. Inspect its contents using `read_file()`. Read additional chunks only when necessary to understand the format and schema.
-3. Profile the source based on observed contents. Identify its format, structure, columns, data types, likely meanings, missing values, and parsing requirements. Clearly distinguish observations from assumptions.
-4. Generate all five required artifacts with complete, source-specific content:
-   - `profile.json` — structured source profile.
-   - `semantic-metadata.md` — human-readable table and column descriptions.
-   - `proposal.md` — ingestion proposal and relevant decisions.
-   - `prompt.md` — the instructions and context used to generate the ingestion logic.
-   - `ingest.py` — the complete ingestion script.
-5. Review the artifacts for completeness and consistency.
-6. Call `save_ingestion_artifacts()` with all required arguments, including the five artifacts and the source file's exact key.
-7. Stop after the save operation. Report the result and the saved artifact locations.
+1. Call `check_for_new_files()` and select one file from `new_files`.
+2. Inspect its contents using `read_file()`. Read additional chunks only when necessary to understand its structure.
+3. Create a source profile based on observed contents. Distinguish observations from assumptions.
+4. Identify any third-party Python packages required by the generated loader.
+5. Generate all five required artifacts:
+   - `profile.json`
+   - `source_loader.py`
+   - `semantic-metadata.md`
+   - `proposal.md`
+   - `prompt.md`
+6. Review the artifacts for completeness and consistency.
+7. Call `save_ingestion_artifacts()` with all required arguments.
+8. Wait for the tool result, then stop and report the proposal ID and returned artifact keys.
 
-Do not attempt to read the entire source file. Read enough to understand its structure; do not continue reading merely to reach the end or the last chunk.
+Do not read the entire source file. Stop inspecting once you have enough information to understand its format and generate the artifacts.
 
-Do not finish after describing the artifacts or saying you intend to save them. You must call the save tool and wait for its result.
+For every discovered file, you MUST call `save_ingestion_artifacts()` with all five artifacts. Do not finish after merely describing them.
 
 If saving fails, report the returned error and do not claim success.
 
-In the final response, list the proposal ID and artifact keys returned by the tool for each successfully saved file.
+## Generated loader contract
 
-## Spark Ingestion Requirements
+`source_loader.py` must define:
 
-The application assembles the final `ingest.py` using a predefined template. You must generate **only the source-specific ingestion logic**, not the complete script.
+```python
+def load_data(spark, source_path):
+    ...
+```
 
-The following variables are already provided by the template:
+It must return a Spark DataFrame containing the parsed and transformed source data.
 
-- `spark` — an active Spark session created using `create_spark_session()` from `spark_config.py`.
-- `target_table` — the fully qualified destination Iceberg table name.
+The loader must not create or stop a Spark session, write data, access Polaris, or manage Iceberg tables. The application handles these operations separately.
 
-Your generated logic must:
+## Dependencies
 
-- Read and parse the source data using the appropriate Spark APIs.
-- Apply source-specific transformations and type conversions.
-- Handle relevant missing values and parsing issues.
-- Produce a DataFrame suitable for the target Iceberg table.
-- Write the resulting DataFrame to `target_table` through the configured Polaris catalog.
+Include a `dependencies` array in `profile.json` containing only the names of third-party Python packages required by the loader.
 
-Do not:
+Example:
 
-- Create another Spark session or call `create_spark_session()`.
-- Define another `ingest()` function or add a `__main__` block.
-- Access RustFS directly or write Iceberg files manually.
-- Configure Polaris or the storage backend yourself.
-- Include placeholder code, TODOs, pseudocode, or instructions for a human to complete.
-- Execute, submit, or test the generated script.
+```json
+"dependencies": ["astropy", "numpy"]
+```
 
-Generate complete, executable source-specific logic that fits inside the template's existing `try` block. The application is responsible for assembling and saving the final script.
+Do not include versions, reasons, installation commands, URLs, or standard-library modules. Use an empty array if no additional packages are required.
 
-**Execution boundary:** This workflow only generates and saves artifacts. It must never execute the generated Spark script or create/modify Iceberg tables.
+Do not install dependencies or execute generated code.
+
+## Execution boundary
+
+This workflow only generates and saves artifacts. Never execute the generated loader, submit a Spark job, or create or modify Iceberg tables.

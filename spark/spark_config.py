@@ -82,6 +82,34 @@ def create_spark_session(app_name: str) -> SparkSession:
             "spark.sql.catalog.polaris.s3.path-style-access",
             "true",
         )
+        .config(
+            "spark.hadoop.fs.s3a.access.key",
+            os.environ["AWS_ACCESS_KEY_ID"]
+        )
+        .config(
+            "spark.hadoop.fs.s3a.secret.key",
+            os.environ["AWS_SECRET_ACCESS_KEY"]
+        )
+        .config(
+            "spark.hadoop.fs.s3a.endpoint",
+            "http://localhost:9000"
+        )
+        .config(
+            "spark.hadoop.fs.s3a.endpoint.region",
+            os.getenv("AWS_REGION", "us-east-1")
+        )
+        .config(
+            "spark.hadoop.fs.s3a.path.style.access",
+            "true"
+        )
+        .config(
+            "spark.hadoop.fs.s3a.connection.ssl.enabled",
+            "false"
+        )
+        .config(
+            "spark.hadoop.fs.s3a.aws.credentials.provider",
+            "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider"
+        )
     )
 
     return builder.getOrCreate()
